@@ -6,8 +6,10 @@ description = "A redirection.io redirect engine as an http-wasm plugin for Sōzu
 license = "MIT"
 repository = "https://github.com/kemeter/sozune-redirectionio"
 
+# cdylib -> the wasm guest; rlib -> so the host-side sync binary can link the
+# translator module.
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # redirection.io's own rule engine, matched locally in the guest. `router` is
@@ -19,6 +21,11 @@ getrandom = "0.4"
 # Used only by the host-side translator module (src/translate.rs), which is
 # compiled out of the wasm guest.
 serde = { version = "1", features = ["derive"] }
+
+# HTTP client for the sync binary. Host-side only — never compiled into the
+# wasm guest.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 
 [dev-dependencies]
 http-wasm-host = { path = "../http-wasm" }
