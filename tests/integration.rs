@@ -1,19 +1,16 @@
 //! Loads the compiled guest into the http-wasm host and drives it end to end.
 //!
-//! The live redirection.io agent is replaced by a `Fetcher` we control: it
-//! records the request the guest built, and answers with an `Action` JSON as
-//! the agent's `/action` endpoint would. So the test exercises the real path —
-//! request JSON building, agent round-trip via `http_fetch`, action parsing,
-//! status + Location application — with no network.
+//! v2 (local matching): the ruleset is carried in the plugin config; the guest
+//! matches locally via the embedded redirectionio engine. No agent, no Fetcher.
+//! A `/old` -> `/new` (301) rule must short-circuit; a non-matching path passes
+//! through.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::OnceLock;
 
-use http_wasm_host::{
-    FetchRequest, FetchResponse, Fetcher, HeaderKind, Host, Limits, Next, Plugin,
-};
+use http_wasm_host::{HeaderKind, Host, Limits, Next, Plugin};
 
 fn guest_wasm() -> &'static [u8] {
     static WASM: OnceLock<Vec<u8>> = OnceLock::new();
@@ -30,8 +27,6 @@ fn guest_wasm() -> &'static [u8] {
     })
 }
 
-/// In-memory HTTP exchange. The guest reads the request line/headers and, on a
-/// short-circuit, writes the response status/headers back here for assertions.
 struct TestHost {
     method: String,
     uri: String,
@@ -133,106 +128,43 @@ impl Host for TestHost {
     }
 }
 
-/// A stand-in for the redirection.io agent. `reply` is returned for every call;
-/// `seen` records the requests the guest made so the test can assert on them.
-struct FakeAgent {
-    reply: FetchResponse,
-    seen: Mutex<Vec<FetchRequest>>,
-}
+/// One engine-format redirect rule in the plugin config.
+const CONFIG: &[u8] = br#"{"rules":[
+    {"id":"r1","source":{"path":"/old"},"rank":0,"target":"/new","status_code":301}
+]}"#;
 
-impl FakeAgent {
-    fn new(status: u16, body: &str) -> Arc<Self> {
-        Arc::new(Self {
-            reply: FetchResponse {
-                status,
-                headers: vec![],
-                body: body.as_bytes().to_vec(),
-            },
-            seen: Mutex::new(Vec::new()),
-        })
-    }
-}
-
-impl Fetcher for FakeAgent {
-    fn fetch(&self, request: FetchRequest) -> Result<FetchResponse, String> {
-        self.seen.lock().unwrap().push(request);
-        Ok(self.reply.clone())
-    }
-}
-
-/// A 301→/new action, verbatim from the live agent (agent.redirection.io) for a
-/// `/old` -> `/new` rule. The Location is nested under
-/// header_filters[].filter.header / .value.
-const REDIRECT_ACTION: &str = r#"{"status_code_update":{"status_code":301,"on_response_status_codes":[],"exclude_response_status_codes":false,"fallback_status_code":0,"rule_id":"7b8508e2-b24d-4fd8-aaa9-295a9f066b28","fallback_rule_id":null,"unit_id":"c57ac3c8-48f1-40dc-8aa6-3e46646bf70e","target_hash":"status_code"},"header_filters":[{"filter":{"action":"override","header":"Location","value":"/new","id":"c57ac3c8-48f1-40dc-8aa6-3e46646bf70e","target_hash":"header::location"},"on_response_status_codes":[],"exclude_response_status_codes":false,"rule_id":"7b8508e2-b24d-4fd8-aaa9-295a9f066b28"}],"body_filters":[],"rule_ids":["7b8508e2-b24d-4fd8-aaa9-295a9f066b28"],"rule_traces":[],"rules_applied":[],"log_override":null,"peer_override":null,"variables":[]}"#;
-
-const CONFIG: &[u8] = br#"{"token":"tok-123","agent_host":"https://agent.redirection.io"}"#;
-
-fn run(host: &str, uri: &str, fake: Arc<FakeAgent>) -> (Next, TestHost) {
-    let mut h = TestHost::new(host, uri, CONFIG);
-    let plugin = Plugin::from_bytes(guest_wasm(), Limits::default())
-        .unwrap()
-        .with_fetcher(fake);
+fn run(host: &str, uri: &str, config: &[u8]) -> (Next, TestHost) {
+    let mut h = TestHost::new(host, uri, config);
+    let plugin = Plugin::from_bytes(guest_wasm(), Limits::default()).unwrap();
     let next = plugin.handle_request(&mut h).unwrap();
     (next, h)
 }
 
 #[test]
-fn agent_redirect_action_short_circuits() {
-    let fake = FakeAgent::new(200, REDIRECT_ACTION);
-    let (next, host) = run("app.example.com", "/old", fake.clone());
-
+fn local_rule_short_circuits_with_redirect() {
+    let (next, host) = run("app.example.com", "/old", CONFIG);
     assert_eq!(next, Next::Stop);
     assert_eq!(host.status_code(), 301);
     assert_eq!(host.response_header("location").as_deref(), Some("/new"));
-
-    // The guest POSTed the request to the agent /action endpoint with the token
-    // in the path, and the request body carried the incoming host and path.
-    let seen = fake.seen.lock().unwrap();
-    assert_eq!(seen.len(), 1);
-    let req = &seen[0];
-    assert_eq!(req.method, "POST");
-    assert_eq!(req.url, "https://agent.redirection.io/tok-123/action");
-    let body = String::from_utf8_lossy(&req.body);
-    assert!(
-        body.contains("app.example.com"),
-        "body carries host: {body}"
-    );
-    assert!(body.contains("/old"), "body carries path: {body}");
 }
 
 #[test]
-fn agent_404_forwards() {
-    let fake = FakeAgent::new(404, "");
-    let (next, host) = run("app.example.com", "/keep", fake);
+fn non_matching_path_forwards() {
+    let (next, host) = run("app.example.com", "/keep", CONFIG);
     assert!(matches!(next, Next::Continue(_)));
     assert!(host.response_header("location").is_none());
 }
 
 #[test]
-fn agent_action_without_status_forwards() {
-    // A 200 whose action carries no status change means "proxy normally".
-    let fake = FakeAgent::new(200, r#"{"status_code_update":null,"header_filters":[]}"#);
-    let (next, host) = run("app.example.com", "/x", fake);
+fn empty_ruleset_forwards() {
+    let (next, host) = run("app.example.com", "/old", b"{\"rules\":[]}");
     assert!(matches!(next, Next::Continue(_)));
     assert!(host.response_header("location").is_none());
 }
 
 #[test]
-fn agent_malformed_body_forwards() {
-    let fake = FakeAgent::new(200, "not json");
-    let (next, host) = run("app.example.com", "/x", fake);
+fn no_config_forwards() {
+    let (next, host) = run("app.example.com", "/old", b"{}");
     assert!(matches!(next, Next::Continue(_)));
     assert!(host.response_header("location").is_none());
-}
-
-#[test]
-fn no_token_forwards_without_calling_agent() {
-    let fake = FakeAgent::new(200, REDIRECT_ACTION);
-    let mut h = TestHost::new("app.example.com", "/old", b"{}");
-    let plugin = Plugin::from_bytes(guest_wasm(), Limits::default())
-        .unwrap()
-        .with_fetcher(fake.clone());
-    let next = plugin.handle_request(&mut h).unwrap();
-    assert!(matches!(next, Next::Continue(_)));
-    assert!(fake.seen.lock().unwrap().is_empty());
 }

@@ -1,0 +1,55 @@
+[
+  {
+    "request": {
+      "path_and_query": {
+        "path_and_query": "/",
+        "path_and_query_matching": "/",
+        "skipped_query_params": null,
+        "original": "/"
+      },
+      "path_and_query_v2": "/",
+      "host": null,
+      "scheme": null,
+      "method": "GET",
+      "headers": [],
+      "remote_addr": null,
+      "created_at": null,
+      "sampling_override": null
+    },
+    "unit_trace": {
+      "rule_ids_applied": [
+        "A"
+      ],
+      "unit_ids_applied": [
+        "A:1",
+        "A:2",
+        "A:3",
+        "A:4",
+        "A:5"
+      ],
+      "unit_ids_seen": [
+        "A:1",
+        "A:2",
+        "A:3",
+        "A:4",
+        "A:5"
+      ],
+      "value_computed_by_units": {
+        "A:3": "<!-- MISSING BODY -->",
+        "A:2": "<!-- MISSING -->",
+        "A:4": "New title",
+        "A:1": "<!-- COUCOU -->",
+        "A:5": ""
+      }
+    },
+    "backend_status_code": 200,
+    "response": {
+      "status_code": 0,
+      "headers": [],
+      "body": "<html><head>New title<!-- COUCOU -->Original Meta</meta><!-- COUCOU --><!-- MISSING --></head><body><!-- MISSING BODY --></body></html>"
+    },
+    "should_log_request": true,
+    "redirection_loop": null,
+    "match_traces": []
+  }
+]

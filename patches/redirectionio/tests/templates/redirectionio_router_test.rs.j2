@@ -1,0 +1,119 @@
+#![allow(unknown_lints)]
+#![allow(clippy::all)]
+
+extern crate redirectionio;
+
+#[rustfmt::skip]
+mod generated_tests {
+
+use redirectionio::router::{Router, Trace};
+use redirectionio::RouterConfig;
+use redirectionio::api::Rule;
+use redirectionio::http::{Request, Header, PathAndQueryWithSkipped};
+use redirectionio::action::Action;
+
+{% for name, rule_set in rule_sets %}
+{%- if rule_set.tests | length > 0 -%}
+fn setup_{{ name }}() -> Router<Rule> {
+    let config: RouterConfig = serde_json::from_str(r#"{{ rule_set.config | json_encode() }}"#).expect("cannot deserialize");
+    let mut router = Router::<Rule>::from_config(config);
+{% for _, rule in rule_set.rules %}
+    let route_{{ loop.index }}: Rule = serde_json::from_str(r#"{{ rule.agentInput | json_encode() }}"#).expect("cannot deserialize");
+    router.insert(route_{{ loop.index }});
+{% endfor %}
+    router.cache(Some(100));
+    router
+}
+
+{% for test in rule_set.tests %}
+#[test]
+fn test_{{ name }}_{{ loop.index }}() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let router = setup_{{ name }}();
+    let default_config = RouterConfig::default();
+    let{% if test.headers or test.datetime %} mut{% endif %} request = Request::new(PathAndQueryWithSkipped::from_config(&default_config, r#"{{ test.uri }}"#), r#"{{ test.uri }}"#.to_string(),
+    {%- if test.host -%}Some(r#"{{ test.host }}"#.to_string()){% else %}None{%- endif -%},
+    {%- if test.scheme -%}Some(r#"{{ test.scheme }}"#.to_string()){% else %}None{%- endif -%},
+    {%- if test.method -%}Some(r#"{{ test.method }}"#.to_string()){% else %}None{%- endif -%},
+    {%- if test.remote_ip -%}r#"{{ test.remote_ip }}"#.to_string().parse().ok(){% else %}None{%- endif -%},
+    {%- if test.sampling_override | default(value="null") != "null" -%}Some({%- if test.sampling_override -%}true{%- else -%}false{%- endif -%}){%- else -%}None{%- endif -%}
+    );
+    {%- if test.headers -%}
+    {% for header in test.headers %}
+    request.add_header(r#"{{ header.name }}"#.to_string(), r#"{{ header.value }}"#.to_string(), false);
+    {%- endfor -%}
+    {%- endif %}
+    {% if test.datetime %}
+    request.set_created_at(Some(r#"{{ test.datetime }}"#.to_string()));
+    {% endif %}
+    let request_configured = Request::rebuild_with_config(&router.config, &request);
+    let matched = router.match_request(&request_configured);
+    let traces = router.trace_request(&request_configured);
+    let routes_traces = Trace::<Rule>::get_routes_from_traces(&traces);
+
+    assert_eq!(!matched.is_empty(), {{ test.match }});
+    assert_eq!(!routes_traces.is_empty(), {{ test.match }});
+{% if test.match %}
+    let mut action = Action::from_routes_rule(matched, &request_configured, None);
+    let response_status_code = {% if test.response_status_code %}{{ test.response_status_code }}{% else %}0{% endif %};
+{% if test.status >= 0 %}
+    let action_status_code = action.get_status_code(response_status_code, None);
+    assert_eq!(action_status_code, {{ test.status }});
+    {%- endif -%}
+{% if test.location %}
+    let headers = action.filter_headers(Vec::new(), response_status_code, false, None);
+    assert_eq!(headers.len(), 1);
+
+    let target_header = headers.first().unwrap();
+    assert_eq!(target_header.name, "Location");
+    assert_eq!(target_header.value, r#"{{ test.location }}"#);
+    {%- endif -%}
+{% if test.should_filter_body %}
+    let body_filter_opt = action.create_filter_body(response_status_code, &[], None);
+    assert_eq!(body_filter_opt.is_some(), {{ test.should_filter_body.enable }});
+{% if test.should_filter_body.enable %}
+    let mut body_filter = body_filter_opt.unwrap();
+{% if test.should_filter_body.is_binary %}
+    let mut new_body = body_filter.filter(b"{{ test.should_filter_body.original_body | as_bytes }}".to_vec(), None);
+    new_body.extend(body_filter.end(None));
+    assert_eq!(&new_body, b"{{ test.should_filter_body.expected_body | as_bytes }}");
+{% else %}
+    let mut new_body = body_filter.filter(r#"{{ test.should_filter_body.original_body }}"#.as_bytes().to_vec(), None);
+    new_body.extend(body_filter.end(None));
+    assert_eq!(&String::from_utf8(new_body).unwrap(), r#"{{ test.should_filter_body.expected_body }}"#);
+    {%- endif -%}
+    {%- endif -%}
+    {%- endif -%}
+{% if test.should_not_log %}
+    assert_eq!(action.should_log_request(true, response_status_code, None), false);
+    {%- else %}
+    assert_eq!(action.should_log_request(true, response_status_code, None), true);
+    {%- endif -%}
+{% endif %}
+{%- if test.should_filter_header and test.should_filter_header.enable %}
+    let {% if test.should_filter_header.original_headers | length > 0 %}mut {% endif %}response_headers = Vec::new();
+{% for header in test.should_filter_header.original_headers %}
+    response_headers.push(Header {
+        name: r#"{{ header.name }}"#.to_string(),
+        value: r#"{{ header.value }}"#.to_string(),
+    });
+{% endfor %}
+    let filtered_headers = action.filter_headers(response_headers, response_status_code, false, None);
+    let header_map = Header::create_header_map(filtered_headers);
+{% for header in test.should_filter_header.expected_headers %}
+    let value = header_map.get_all(r#"{{ header.name }}"#).iter().find(|x| x.as_str() == r#"{{ header.value }}"#);
+
+    assert!(value.is_some());
+{% endfor -%}
+{% for header_name in test.should_filter_header.not_expected_headers %}
+    let value = header_map.get(r#"{{ header_name }}"#);
+
+    assert!(value.is_none());
+{% endfor -%}
+{%- endif %}
+}
+{% endfor %}
+{%- endif %}
+{% endfor %}
+}

@@ -1,0 +1,35 @@
+[
+  {
+    "request": {
+      "path_and_query": {
+        "path_and_query": "/not/possible",
+        "path_and_query_matching": "/not/possible",
+        "skipped_query_params": null,
+        "original": "/not/possible"
+      },
+      "path_and_query_v2": "/not/possible",
+      "host": null,
+      "scheme": null,
+      "method": "GET",
+      "headers": [],
+      "remote_addr": null,
+      "created_at": null,
+      "sampling_override": null
+    },
+    "unit_trace": {
+      "rule_ids_applied": [],
+      "unit_ids_applied": [],
+      "unit_ids_seen": [],
+      "value_computed_by_units": {}
+    },
+    "backend_status_code": 200,
+    "response": {
+      "status_code": 0,
+      "headers": [],
+      "body": "<!DOCTYPE html>\n<html>\n    <head>\n    </head>\n    <body>\n    </body>\n</html>"
+    },
+    "should_log_request": true,
+    "redirection_loop": null,
+    "match_traces": []
+  }
+]

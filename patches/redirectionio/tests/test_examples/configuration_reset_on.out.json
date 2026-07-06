@@ -1,0 +1,86 @@
+[
+  {
+    "request": {
+      "path_and_query": {
+        "path_and_query": "/goo",
+        "path_and_query_matching": "/goo",
+        "skipped_query_params": null,
+        "original": "/goo"
+      },
+      "path_and_query_v2": "/goo",
+      "host": null,
+      "scheme": null,
+      "method": null,
+      "headers": [],
+      "remote_addr": null,
+      "created_at": null,
+      "sampling_override": null
+    },
+    "unit_trace": {
+      "rule_ids_applied": [
+        "56c402fd-c854-46c6-b89d-a874818b717b"
+      ],
+      "unit_ids_applied": [
+        "1d5c840c-2d6c-4c96-822f-808a1dc0a794",
+        "c73e8447-08b5-490f-bd46-0a137e16b749",
+        "ee15e733-ad61-4640-973f-732dcc68f5d5"
+      ],
+      "unit_ids_seen": [
+        "1d5c840c-2d6c-4c96-822f-808a1dc0a794",
+        "ee15e733-ad61-4640-973f-732dcc68f5d5",
+        "c73e8447-08b5-490f-bd46-0a137e16b749"
+      ],
+      "value_computed_by_units": {}
+    },
+    "backend_status_code": 200,
+    "response": {
+      "status_code": 0,
+      "headers": [],
+      "body": "<!DOCTYPE html>\n<html>\n    <head>\n    </head>\n    <body>\n    </body>\n</html>"
+    },
+    "should_log_request": true,
+    "redirection_loop": null,
+    "match_traces": []
+  },
+  {
+    "request": {
+      "path_and_query": {
+        "path_and_query": "/anything",
+        "path_and_query_matching": "/anything",
+        "skipped_query_params": null,
+        "original": "/anything"
+      },
+      "path_and_query_v2": "/anything",
+      "host": null,
+      "scheme": null,
+      "method": null,
+      "headers": [],
+      "remote_addr": null,
+      "created_at": null,
+      "sampling_override": null
+    },
+    "unit_trace": {
+      "rule_ids_applied": [
+        "56c402fd-c854-46c6-b89d-a874818b717b"
+      ],
+      "unit_ids_applied": [
+        "c73e8447-08b5-490f-bd46-0a137e16b749",
+        "ee15e733-ad61-4640-973f-732dcc68f5d5"
+      ],
+      "unit_ids_seen": [
+        "ee15e733-ad61-4640-973f-732dcc68f5d5",
+        "c73e8447-08b5-490f-bd46-0a137e16b749"
+      ],
+      "value_computed_by_units": {}
+    },
+    "backend_status_code": 200,
+    "response": {
+      "status_code": 0,
+      "headers": [],
+      "body": "<!DOCTYPE html>\n<html>\n    <head>\n    </head>\n    <body>\n    </body>\n</html>"
+    },
+    "should_log_request": true,
+    "redirection_loop": null,
+    "match_traces": []
+  }
+]

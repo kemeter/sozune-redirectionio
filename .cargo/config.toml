@@ -1,0 +1,7 @@
+# redirectionio pulls rand -> getrandom, whose default wasm32 backend imports JS
+# (crypto.getRandomValues). Sōzune's wasmtime host has no JS, so force getrandom's
+# custom backend; the guest provides __getrandom_v03_custom in src/lib.rs.
+# redirection.io only uses randomness for rule sampling, which is not security
+# sensitive, so a small non-crypto PRNG is fine.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="custom"']
