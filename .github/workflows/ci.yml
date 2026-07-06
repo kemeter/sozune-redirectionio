@@ -66,6 +66,21 @@ jobs:
       - run: cargo build --release --target wasm32-unknown-unknown
         working-directory: sozune-redirectionio
 
+      # v2 embeds libredirectionio via patched crates. The guest MUST import
+      # nothing but the http-wasm host functions — any wasm-bindgen (JS) import
+      # means a patch regressed and the module won't load under wasmtime.
+      - name: Assert wasm imports only http_handler
+        working-directory: sozune-redirectionio
+        run: |
+          cargo install wasm-tools --locked || true
+          WASM=target/wasm32-unknown-unknown/release/sozune_redirectionio.wasm
+          MODULES=$(wasm-tools print "$WASM" | grep -oE '\(import "[^"]+"' | sed -E 's/\(import "([^"]+)"/\1/' | sort -u)
+          echo "import modules: $MODULES"
+          if [ "$MODULES" != "http_handler" ]; then
+            echo "::error::wasm imports unexpected modules (expected only http_handler): $MODULES"
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@v7
         with:
           name: sozune-redirectionio-wasm
