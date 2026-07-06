@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: sozune-redirectionio
+
+      # Cargo must resolve the full dependency graph (including the
+      # ../http-wasm path dev-dependency) before fmt/clippy can run.
+      - name: Checkout http-wasm host
+        uses: actions/checkout@v6
+        with:
+          repository: kemeter/http-wasm
+          path: http-wasm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sozune-redirectionio
+
+      - run: cargo fmt --all -- --check
+        working-directory: sozune-redirectionio
+
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: sozune-redirectionio
+
+  build:
+    name: build wasm32
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: sozune-redirectionio
+
+      - name: Checkout http-wasm host
+        uses: actions/checkout@v6
+        with:
+          repository: kemeter/http-wasm
+          path: http-wasm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sozune-redirectionio
+
+      - run: cargo build --release --target wasm32-unknown-unknown
+        working-directory: sozune-redirectionio
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sozune-redirectionio-wasm
+          path: sozune-redirectionio/target/wasm32-unknown-unknown/release/sozune_redirectionio.wasm
+
+  test:
+    name: integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: sozune-redirectionio
+
+      # The integration test loads the guest into the http-wasm host, which is
+      # referenced as a sibling path dependency (../http-wasm).
+      - name: Checkout http-wasm host
+        uses: actions/checkout@v6
+        with:
+          repository: kemeter/http-wasm
+          path: http-wasm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sozune-redirectionio
+
+      - run: cargo test --release
+        working-directory: sozune-redirectionio

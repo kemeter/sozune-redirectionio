@@ -1,0 +1,18 @@
+[package]
+name = "sozune-redirectionio"
+version = "0.1.0"
+edition = "2021"
+description = "A redirection.io redirect engine as an http-wasm plugin for Sōzune."
+license = "MIT"
+repository = "https://github.com/kemeter/sozune-redirectionio"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dev-dependencies]
+http-wasm-host = { path = "../http-wasm" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
