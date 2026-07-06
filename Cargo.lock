@@ -2136,6 +2136,7 @@ dependencies = [
  "getrandom 0.4.3",
  "http-wasm-host",
  "redirectionio",
+ "serde",
  "serde_json",
 ]
 

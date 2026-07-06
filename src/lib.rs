@@ -32,6 +32,11 @@ use redirectionio::api::Rule;
 use redirectionio::http::{Header, PathAndQueryWithSkipped, Request};
 use redirectionio::router::Router;
 
+// The editor->engine rule translator runs host-side (the sync process), never
+// in the wasm guest, so it is compiled out of the wasm build.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod translate;
+
 /// getrandom custom backend (enabled via `--cfg getrandom_backend="custom"`).
 /// redirectionio pulls `rand -> getrandom`, whose default wasm32 backend imports
 /// JS; wasmtime has none. Randomness here is only rule sampling (an A/B

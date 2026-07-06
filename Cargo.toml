@@ -16,6 +16,9 @@ redirectionio = { version = "3.2.0", default-features = false, features = ["rout
 serde_json = "1"
 # Referenced by the getrandom custom backend in src/lib.rs (see .cargo/config.toml).
 getrandom = "0.4"
+# Used only by the host-side translator module (src/translate.rs), which is
+# compiled out of the wasm guest.
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 http-wasm-host = { path = "../http-wasm" }
