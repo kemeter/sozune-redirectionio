@@ -26,11 +26,11 @@
 //! wasm-bindgen, the redirectionio/chrono/getrandom JS deps are patched out via
 //! `[patch.crates-io]` (see Cargo.toml) and getrandom uses a custom backend.
 
-use redirectionio::RouterConfig;
 use redirectionio::action::Action;
 use redirectionio::api::Rule;
 use redirectionio::http::{Header, PathAndQueryWithSkipped, Request};
 use redirectionio::router::Router;
+use redirectionio::RouterConfig;
 
 // The editor->engine rule translator runs host-side (the sync process), never
 // in the wasm guest, so it is compiled out of the wasm build.
