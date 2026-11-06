@@ -9,8 +9,19 @@ ruleset that a small out-of-band process refreshes periodically. If the refresh
 source is down, the plugin keeps matching with its last known ruleset — nothing
 has to be "up" at request time.
 
-This is a **separate deliverable** from the shipped v1 (the agent-backed plugin
-on `main`). v1 stays as-is; v2 lives on a branch until proven end to end.
+v2 has replaced v1 (the agent-backed plugin) on `main` (crate version 0.2.0);
+there is no separate v2 branch and v1 is no longer maintained alongside.
+
+## Status (2026-11-06)
+
+- Phase 0 — done: 3 vendored patches, guest builds with 0 JS imports (CI-asserted).
+- Phase 1 — done: local matching in the guest, integration tests green.
+- Phase 2 — done (redirect scope): `src/translate.rs`, unit-tested through
+  `Rule::from_json`.
+- Phase 3 — code done (`src/bin/sync.rs`, unit-tested); **live gate still
+  pending**: run against the real project with an API token and confirm Sōzune
+  redirects with no agent running.
+- Phase 4 — done: CI (fmt, clippy, wasm build + import check, tests) and README.
 
 ## Why v2 (vs the shipped v1 agent plugin)
 
@@ -95,7 +106,6 @@ upstream — file that later (out of scope for v2).
 ## Work breakdown
 
 ### Phase 0 — Branch + scaffolding
-- Branch `v2-local-matching` off `main`.
 - Vendor the 3 patched crates under `patches/` in the repo; wire
   `[patch.crates-io]` + `.cargo/config.toml`.
 - Add `redirectionio` (patched), `serde_json`, `getrandom` deps.
