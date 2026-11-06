@@ -14,7 +14,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # redirection.io's own rule engine, matched locally in the guest. `router` is
 # needed to build a Router and derive an Action from matched rules.
-redirectionio = { version = "3.2.0", default-features = false, features = ["router"] }
+redirectionio = { version = "3.4.0", default-features = false, features = ["router"] }
 serde_json = "1"
 # Only to build the request timestamp (`DateTime::from_timestamp_nanos`); the
 # resolved version is the patched one below, without the JS clock.

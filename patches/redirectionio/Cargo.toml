@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "redirectionio"
-version = "3.2.0"
+version = "3.4.0"
 authors = ["Joel Wurtz <jwurtz@redirection.io>"]
 build = "src/build.rs"
 autolib = false
@@ -86,7 +86,7 @@ path = "benches/test_examples_benchmark.rs"
 harness = false
 
 [dependencies.brotli]
-version = "8.0.3"
+version = "9.0.0"
 optional = true
 
 [dependencies.chrono]
@@ -123,7 +123,7 @@ version = "0.1.6"
 features = ["serde"]
 
 [dependencies.lol_html]
-version = "2.9.0"
+version = "3.0.1"
 
 [dependencies.percent-encoding]
 version = "2.3.2"
@@ -188,11 +188,18 @@ features = ["serde"]
 version = "1.0.228"
 features = ["derive"]
 
+[build-dependencies.serde_json]
+version = "1.0.150"
+
 [build-dependencies.serde_yaml]
 version = "0.9.34"
 
 [build-dependencies.tera]
-version = "1.20.1"
+version = "2.3.0"
+features = [
+    "glob_fs",
+    "preserve_order",
+]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.chrono]
 version = "0.4.45"
