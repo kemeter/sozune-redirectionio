@@ -125,10 +125,14 @@ of rules (roughly 10 ms per 1000 rules).
 ## Limitations
 
 - **Redirect scope.** The translator (`GET /rules` editor format → engine format)
-  currently covers **redirects**. Rules whose action is not `redirection` are
-  logged and skipped by the sync binary. Extend `src/translate.rs` as you need
-  header filters, markers, conditions, etc. — the engine supports them; the
-  translator just has to map them.
+  covers **redirects**, optionally gated by methods (or excluded methods),
+  sampling, and `date` / `datetime` / weekday conditions. A rule using anything
+  else — request headers, IP address, response status codes, time-of-day,
+  markers, variables, or an action other than `redirection` — is **skipped and
+  logged** by the sync binary, never translated without its condition (which
+  would widen it). Extend `src/translate.rs` as you need more; the engine
+  supports them, the translator just has to map them.
+- **Dates are UTC.** Editor dates carry no timezone and are read as UTC.
 - **Staleness.** Rules are as fresh as the last successful sync (tune
   `RIO_INTERVAL`). This is the cost of not running an agent.
 - **API token.** The sync binary needs an API token, distinct from the agent
