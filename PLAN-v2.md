@@ -16,10 +16,11 @@ there is no separate v2 branch and v1 is no longer maintained alongside.
 
 - Phase 0 — done: 3 vendored patches, guest builds with 0 JS imports (CI-asserted).
 - Phase 1 — done: local matching in the guest, integration tests green.
-- Phase 2 — done (redirect scope): `src/translate.rs`, unit-tested through
-  `Rule::from_json`.
-- Phase 3 — code done (`src/bin/sync.rs`, unit-tested); **live gate still
-  pending**: run against the real project with an API token and confirm Sōzune
+- Phase 2 — done: redirects gated by methods, sampling, date/datetime/weekday
+  conditions; anything else is skipped and logged (`src/translate.rs`, tested
+  through the real engine).
+- Phase 3 — code done (`src/bin/sync.rs`: pagination, 429 back-off,
+  unit-tested); **live gate still pending**: run against the real project with an API token and confirm Sōzune
   redirects with no agent running.
 - Phase 4 — done: CI (fmt, clippy, wasm build + import check, tests) and README.
 
