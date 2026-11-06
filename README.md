@@ -100,6 +100,22 @@ labels:
 Each `rules` entry is an engine-format `redirectionio::api::Rule`. You normally
 never hand-write these — the sync binary produces them from your project.
 
+## Host requirements
+
+Besides the standard http-wasm functions, the plugin imports two non-standard
+host extensions from `http_handler`: `get_time_unix_nanos` (request timestamp,
+for date/time/weekday rule conditions) and `get_random` (entropy, for rule
+sampling). A `wasm32-unknown-unknown` guest has neither a clock nor an entropy
+source, and each request runs in a fresh instance. The host must provide both,
+otherwise the plugin fails to instantiate.
+
+The guest caches the Router it builds from its config (keyed by the config, so
+routes with different rules stay separate). The cache only pays off when the
+host reuses guest instances across requests (`http-wasm-host`'s
+`Plugin::with_instance_reuse`); with a fresh instance per request the config is
+re-parsed and the Router rebuilt every time, a cost that grows with the number
+of rules (roughly 10 ms per 1000 rules).
+
 ## Behaviour
 
 - **Redirect** — a matching rule with a status code sets that status + `Location`
@@ -109,10 +125,14 @@ never hand-write these — the sync binary produces them from your project.
 ## Limitations
 
 - **Redirect scope.** The translator (`GET /rules` editor format → engine format)
-  currently covers **redirects**. Rules whose action is not `redirection` are
-  logged and skipped by the sync binary. Extend `src/translate.rs` as you need
-  header filters, markers, conditions, etc. — the engine supports them; the
-  translator just has to map them.
+  covers **redirects**, optionally gated by methods (or excluded methods),
+  sampling, and `date` / `datetime` / weekday conditions. A rule using anything
+  else — request headers, IP address, response status codes, time-of-day,
+  markers, variables, or an action other than `redirection` — is **skipped and
+  logged** by the sync binary, never translated without its condition (which
+  would widen it). Extend `src/translate.rs` as you need more; the engine
+  supports them, the translator just has to map them.
+- **Dates are UTC.** Editor dates carry no timezone and are read as UTC.
 - **Staleness.** Rules are as fresh as the last successful sync (tune
   `RIO_INTERVAL`). This is the cost of not running an agent.
 - **API token.** The sync binary needs an API token, distinct from the agent

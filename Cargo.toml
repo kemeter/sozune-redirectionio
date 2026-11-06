@@ -16,6 +16,9 @@ crate-type = ["cdylib", "rlib"]
 # needed to build a Router and derive an Action from matched rules.
 redirectionio = { version = "3.2.0", default-features = false, features = ["router"] }
 serde_json = "1"
+# Only to build the request timestamp (`DateTime::from_timestamp_nanos`); the
+# resolved version is the patched one below, without the JS clock.
+chrono = { version = "0.4", default-features = false }
 # Referenced by the getrandom custom backend in src/lib.rs (see .cargo/config.toml).
 getrandom = "0.4"
 # Used only by the host-side translator module (src/translate.rs), which is

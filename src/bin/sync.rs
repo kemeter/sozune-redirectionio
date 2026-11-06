@@ -61,29 +61,91 @@ mod native {
         }
     }
 
-    /// Build the `GET /rules` URL for a project.
-    fn rules_url(api_base: &str, project_id: &str) -> String {
-        format!(
+    /// Build the `GET /rules` URL for a project, optionally resuming after the
+    /// last rule id of the previous page.
+    fn rules_url(api_base: &str, project_id: &str, after: Option<&str>) -> String {
+        let mut url = format!(
             "{}/rules?projectId={}",
             api_base.trim_end_matches('/'),
             project_id
-        )
+        );
+        if let Some(id) = after {
+            url.push_str("&searchAfterId=");
+            url.push_str(id);
+        }
+        url
     }
 
-    /// Fetch the raw `GET /rules` JSON from the API.
-    fn fetch_rules(client: &reqwest::blocking::Client, cfg: &Config) -> Result<String, String> {
-        let resp = client
-            .get(rules_url(&cfg.api_base, &cfg.project_id))
-            .bearer_auth(&cfg.token)
-            .header("Accept", "application/json")
-            .send()
-            .map_err(|e| format!("request failed: {e}"))?;
-        let status = resp.status();
-        let body = resp.text().unwrap_or_default();
-        if !status.is_success() {
-            return Err(format!("API returned {status}: {body}"));
+    /// How many times a rate-limited (429) page is retried before giving up.
+    const MAX_RATE_LIMIT_RETRIES: u32 = 5;
+
+    /// Fetch one page of `GET /rules`, waiting out rate limits (the API allows
+    /// about 10 requests a minute and answers 429 with `Retry-After`).
+    fn fetch_page(
+        client: &reqwest::blocking::Client,
+        cfg: &Config,
+        after: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let url = rules_url(&cfg.api_base, &cfg.project_id, after);
+        for attempt in 0..=MAX_RATE_LIMIT_RETRIES {
+            let resp = client
+                .get(&url)
+                .bearer_auth(&cfg.token)
+                .header("Accept", "application/json")
+                .send()
+                .map_err(|e| format!("request failed: {e}"))?;
+            let status = resp.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_RATE_LIMIT_RETRIES
+            {
+                let wait = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .unwrap_or(10);
+                eprintln!("rate limited, retrying in {wait}s");
+                std::thread::sleep(Duration::from_secs(wait));
+                continue;
+            }
+            let body = resp.text().unwrap_or_default();
+            if !status.is_success() {
+                return Err(format!("API returned {status}: {body}"));
+            }
+            return serde_json::from_str(&body).map_err(|e| format!("unexpected body: {e}"));
         }
-        Ok(body)
+        Err("still rate limited after retries".to_string())
+    }
+
+    /// Walk every page (`searchAfterId` = last id of the previous page) until
+    /// an empty page. Any page failing fails the whole fetch, so a partial
+    /// ruleset never replaces the previous one.
+    fn fetch_all(
+        mut fetch_page: impl FnMut(Option<&str>) -> Result<Vec<serde_json::Value>, String>,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let mut all = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = fetch_page(after.as_deref())?;
+            let Some(last) = page.last() else {
+                return Ok(all);
+            };
+            let last_id = last
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("rule without an id in page")?
+                .to_string();
+            if after.as_deref() == Some(last_id.as_str()) {
+                return Err(format!("pagination did not advance past {last_id}"));
+            }
+            all.extend(page);
+            after = Some(last_id);
+        }
+    }
+
+    /// Fetch every rule of the project as one JSON array.
+    fn fetch_rules(client: &reqwest::blocking::Client, cfg: &Config) -> Result<String, String> {
+        let rules = fetch_all(|after| fetch_page(client, cfg, after))?;
+        serde_json::to_string(&rules).map_err(|e| e.to_string())
     }
 
     /// Turn a raw `GET /rules` body into the plugin config string, logging skips.
@@ -150,13 +212,52 @@ mod native {
         #[test]
         fn rules_url_is_well_formed() {
             assert_eq!(
-                rules_url("https://api.redirection.io", "abc-123"),
+                rules_url("https://api.redirection.io", "abc-123", None),
                 "https://api.redirection.io/rules?projectId=abc-123"
             );
             assert_eq!(
-                rules_url("https://api.redirection.io/", "abc-123"),
-                "https://api.redirection.io/rules?projectId=abc-123"
+                rules_url("https://api.redirection.io/", "abc-123", Some("r9")),
+                "https://api.redirection.io/rules?projectId=abc-123&searchAfterId=r9"
             );
+        }
+
+        fn page(ids: &[&str]) -> Vec<serde_json::Value> {
+            ids.iter()
+                .map(|id| serde_json::json!({ "id": id }))
+                .collect()
+        }
+
+        #[test]
+        fn fetch_all_follows_pages_until_empty() {
+            let mut calls = Vec::new();
+            let all = fetch_all(|after| {
+                calls.push(after.map(str::to_string));
+                Ok(match after {
+                    None => page(&["a", "b"]),
+                    Some("b") => page(&["c"]),
+                    Some("c") => Vec::new(),
+                    other => panic!("unexpected cursor {other:?}"),
+                })
+            })
+            .unwrap();
+            let ids: Vec<_> = all.iter().map(|r| r["id"].as_str().unwrap()).collect();
+            assert_eq!(ids, ["a", "b", "c"]);
+            assert_eq!(calls, [None, Some("b".into()), Some("c".into())]);
+        }
+
+        #[test]
+        fn fetch_all_fails_whole_sync_on_a_failed_page() {
+            let result = fetch_all(|after| match after {
+                None => Ok(page(&["a"])),
+                _ => Err("boom".to_string()),
+            });
+            assert_eq!(result, Err("boom".to_string()));
+        }
+
+        #[test]
+        fn fetch_all_stops_if_cursor_does_not_advance() {
+            let result = fetch_all(|_| Ok(page(&["a"])));
+            assert!(result.unwrap_err().contains("did not advance"));
         }
 
         #[test]

@@ -24,8 +24,12 @@
 //!
 //! Targets wasm32-unknown-unknown, run under wasmtime. Because that host is not
 //! wasm-bindgen, the redirectionio/chrono/getrandom JS deps are patched out via
-//! `[patch.crates-io]` (see Cargo.toml) and getrandom uses a custom backend.
+//! `[patch.crates-io]` (see Cargo.toml). The guest has no clock or entropy of
+//! its own, so it takes both from the host's `get_time_unix_nanos` and
+//! `get_random` extensions (getrandom uses a custom backend wired to the
+//! latter).
 
+use chrono::{DateTime, Utc};
 use redirectionio::action::Action;
 use redirectionio::api::Rule;
 use redirectionio::http::{Header, PathAndQueryWithSkipped, Request};
@@ -39,25 +43,26 @@ pub mod translate;
 
 /// getrandom custom backend (enabled via `--cfg getrandom_backend="custom"`).
 /// redirectionio pulls `rand -> getrandom`, whose default wasm32 backend imports
-/// JS; wasmtime has none. Randomness here is only rule sampling (an A/B
-/// percentage), not security-sensitive, so a small non-crypto PRNG suffices.
+/// JS; wasmtime has none. The bytes come from the host's `get_random`
+/// extension instead. A local PRNG would not do: the host runs every request in
+/// a fresh instance, so its state would restart identically each time and rule
+/// sampling would always draw the same value.
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 unsafe extern "Rust" fn __getrandom_v03_custom(
     dest: *mut u8,
     len: usize,
 ) -> Result<(), getrandom::Error> {
-    use core::sync::atomic::{AtomicU64, Ordering};
-    static STATE: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
-    let mut x = STATE.fetch_add(0x2545_F491_4F6C_DD1D, Ordering::Relaxed) | 1;
-    let buf = unsafe { core::slice::from_raw_parts_mut(dest, len) };
-    for byte in buf.iter_mut() {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        *byte = (x & 0xff) as u8;
+    if len == 0 {
+        return Ok(());
     }
-    Ok(())
+    let Ok(len) = i32::try_from(len) else {
+        return Err(getrandom::Error::new_custom(0));
+    };
+    match unsafe { get_random(dest as i32, len) } {
+        1 => Ok(()),
+        _ => Err(getrandom::Error::new_custom(1)),
+    }
 }
 
 const REQUEST: i32 = 0;
@@ -72,12 +77,39 @@ unsafe extern "C" {
     fn get_header_values(kind: i32, name: i32, name_len: i32, buf: i32, buf_limit: i32) -> i64;
     fn set_status_code(status: i32);
     fn set_header_value(kind: i32, name: i32, name_len: i32, value: i32, value_len: i32);
+    // Non-standard host extensions (clock and entropy).
+    fn get_time_unix_nanos() -> i64;
+    // Only the wasm32 getrandom backend calls it.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    fn get_random(buf: i32, len: i32) -> i32;
+}
+
+/// Current time from the host clock. `chrono::Utc::now()` is unavailable: it
+/// traps under wasmtime without the JS bindings we patched out.
+fn now() -> Option<DateTime<Utc>> {
+    let nanos = unsafe { get_time_unix_nanos() };
+    (nanos > 0).then(|| DateTime::from_timestamp_nanos(nanos))
 }
 
 fn read_via<F: Fn(i32, i32) -> i32>(cap: usize, f: F) -> String {
     let mut buf = vec![0u8; cap];
     let len = f(buf.as_mut_ptr() as i32, cap as i32);
     let len = if len < 0 { 0 } else { (len as usize).min(cap) };
+    buf.truncate(len);
+    String::from_utf8(buf).unwrap_or_default()
+}
+
+/// Read the whole plugin config. `get_config` returns the full length even
+/// when the buffer is smaller, so re-call with an exact-size buffer instead of
+/// truncating: a cut JSON ruleset would parse as no rules at all.
+fn read_config() -> String {
+    const FIRST: usize = 64 * 1024;
+    let mut buf = vec![0u8; FIRST];
+    let len = unsafe { get_config(buf.as_mut_ptr() as i32, FIRST as i32) }.max(0) as usize;
+    if len > FIRST {
+        buf = vec![0u8; len];
+        unsafe { get_config(buf.as_mut_ptr() as i32, len as i32) };
+    }
     buf.truncate(len);
     String::from_utf8(buf).unwrap_or_default()
 }
@@ -166,14 +198,15 @@ fn build_router(rules: Vec<Rule>) -> Option<Router<Rule>> {
 }
 
 /// Build the redirection.io request model from request parts. Pure (no ABI),
-/// so unit-testable off-wasm. `created_at: None` avoids `Utc::now()`, which
-/// traps under wasmtime.
+/// so unit-testable off-wasm. `created_at` drives date/time/weekday rule
+/// conditions; without it such rules never match.
 fn build_rio_request(
     host: &str,
     scheme: &str,
     method: &str,
     path_and_query: &str,
     headers: Vec<(String, String)>,
+    created_at: Option<DateTime<Utc>>,
 ) -> Request {
     let mut request = Request {
         path_and_query_skipped: PathAndQueryWithSkipped::from_static(path_and_query),
@@ -183,7 +216,7 @@ fn build_rio_request(
         method: (!method.is_empty()).then(|| method.to_string()),
         headers: Vec::new(),
         remote_addr: None,
-        created_at: None,
+        created_at,
         sampling_override: None,
     };
     for (name, value) in headers {
@@ -200,11 +233,45 @@ fn scheme() -> &'static str {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_request() -> i64 {
-    let cfg = read_via(65536, |p, l| unsafe { get_config(p, l) });
-    let Some(router) = build_router(parse_ruleset(&cfg)) else {
-        return 1; // no rules → let the request through
-    };
+    let cfg = read_config();
+    with_cached_router(&cfg, |router| match router {
+        Some(router) => route_request(router),
+        None => 1, // no rules → let the request through
+    })
+}
 
+thread_local! {
+    /// The Router built from the last config seen, keyed by a hash of that
+    /// config. Only useful when the host reuses guest instances; with a fresh
+    /// instance per request it is simply rebuilt each time. Keyed so that one
+    /// instance serving several routes (each with its own config) never
+    /// matches against another route's rules.
+    static ROUTER: std::cell::RefCell<Option<(u64, Option<Router<Rule>>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn config_key(cfg: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    cfg.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Run `f` with the Router for `cfg`, building it only if the config changed.
+fn with_cached_router<R>(cfg: &str, f: impl FnOnce(Option<&Router<Rule>>) -> R) -> R {
+    let key = config_key(cfg);
+    ROUTER.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        if cached.as_ref().is_none_or(|(k, _)| *k != key) {
+            *cached = Some((key, build_router(parse_ruleset(cfg))));
+        }
+        let (_, router) = cached.as_ref().expect("just filled");
+        f(router.as_ref())
+    })
+}
+
+/// Match the current request against `router` and apply the action.
+fn route_request(router: &Router<Rule>) -> i64 {
     let host = request_header_values("host")
         .into_iter()
         .next()
@@ -212,7 +279,14 @@ pub extern "C" fn handle_request() -> i64 {
     let method = read_via(16, |p, l| unsafe { get_method(p, l) });
     let uri = read_via(2048, |p, l| unsafe { get_uri(p, l) });
 
-    let request = build_rio_request(&host, scheme(), &method, &uri, read_request_headers());
+    let request = build_rio_request(
+        &host,
+        scheme(),
+        &method,
+        &uri,
+        read_request_headers(),
+        now(),
+    );
     let request = Request::rebuild_with_config(&router.config, &request);
 
     let matched = router.match_request(&request);
@@ -276,7 +350,7 @@ mod tests {
     fn matches_locally_and_yields_redirect() {
         // The core Phase-1 proof, off-wasm: ruleset -> Router -> match -> Action.
         let router = build_router(parse_ruleset(RULESET)).expect("a router");
-        let req = build_rio_request("app.example.com", "https", "GET", "/old", vec![]);
+        let req = build_rio_request("app.example.com", "https", "GET", "/old", vec![], None);
         let req = Request::rebuild_with_config(&router.config, &req);
         let matched = router.match_request(&req);
         assert!(!matched.is_empty(), "/old should match");
@@ -294,15 +368,39 @@ mod tests {
     #[test]
     fn non_matching_path_does_not_match() {
         let router = build_router(parse_ruleset(RULESET)).expect("a router");
-        let req = build_rio_request("app.example.com", "https", "GET", "/keep", vec![]);
+        let req = build_rio_request("app.example.com", "https", "GET", "/keep", vec![], None);
         let req = Request::rebuild_with_config(&router.config, &req);
         assert!(router.match_request(&req).is_empty());
     }
 
+    /// A redirect limited to a datetime window: /promo -> /sale.
+    fn dated_router(from: &str, to: &str) -> Router<Rule> {
+        let cfg = format!(
+            r#"{{"rules":[{{"id":"d1","source":{{"path":"/promo","datetime":[["{from}","{to}"]]}},"rank":0,"target":"/sale","status_code":302}}]}}"#
+        );
+        build_router(parse_ruleset(&cfg)).expect("a router")
+    }
+
+    fn matches_at(router: &Router<Rule>, at: Option<DateTime<Utc>>) -> bool {
+        let req = build_rio_request("example.com", "https", "GET", "/promo", vec![], at);
+        let req = Request::rebuild_with_config(&router.config, &req);
+        !router.match_request(&req).is_empty()
+    }
+
     #[test]
-    fn request_built_without_now() {
-        let req = build_rio_request("example.com", "https", "GET", "/p?x=1", vec![]);
-        assert!(req.created_at.is_none());
-        assert_eq!(req.host.as_deref(), Some("example.com"));
+    fn dated_rule_matches_inside_its_window_only() {
+        let router = dated_router("2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z");
+        let inside = "2026-11-06T12:00:00Z".parse().unwrap();
+        let after = "2027-02-01T00:00:00Z".parse().unwrap();
+        assert!(matches_at(&router, Some(inside)));
+        assert!(!matches_at(&router, Some(after)));
+    }
+
+    #[test]
+    fn dated_rule_never_matches_without_a_clock() {
+        // Why the guest must pass the host time: with no created_at the engine
+        // treats every date condition as unmet.
+        let router = dated_router("2000-01-01T00:00:00Z", "2999-12-31T23:59:59Z");
+        assert!(!matches_at(&router, None));
     }
 }

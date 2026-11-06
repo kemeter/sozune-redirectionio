@@ -168,3 +168,120 @@ fn no_config_forwards() {
     assert!(matches!(next, Next::Continue(_)));
     assert!(host.response_header("location").is_none());
 }
+
+#[test]
+fn dated_rule_uses_host_clock() {
+    // A window around "now" only matches if the guest reads the host clock:
+    // without a request timestamp the engine treats date conditions as unmet.
+    let config = br#"{"rules":[
+        {"id":"d1","source":{"path":"/promo","datetime":[["2000-01-01T00:00:00Z","2999-12-31T23:59:59Z"]]},"rank":0,"target":"/sale","status_code":302}
+    ]}"#;
+    let (next, host) = run("app.example.com", "/promo", config);
+    assert_eq!(next, Next::Stop);
+    assert_eq!(host.status_code(), 302);
+    assert_eq!(host.response_header("location").as_deref(), Some("/sale"));
+}
+
+#[test]
+fn expired_dated_rule_forwards() {
+    let config = br#"{"rules":[
+        {"id":"d1","source":{"path":"/promo","datetime":[["2000-01-01T00:00:00Z","2001-01-01T00:00:00Z"]]},"rank":0,"target":"/sale","status_code":302}
+    ]}"#;
+    let (next, _) = run("app.example.com", "/promo", config);
+    assert!(matches!(next, Next::Continue(_)));
+}
+
+#[test]
+fn sampled_rule_varies_across_requests() {
+    // Every request runs in a fresh instance, so a guest-local PRNG would draw
+    // the same value each time and a 50% rule would be all-or-nothing. With
+    // host entropy, 64 requests yield both outcomes (miss chance ~ 2^-63).
+    let config = br#"{"rules":[
+        {"id":"s1","source":{"path":"/ab","sampling":50},"rank":0,"target":"/b","status_code":302}
+    ]}"#;
+    let plugin = Plugin::from_bytes(guest_wasm(), Limits::default()).unwrap();
+    let (mut redirected, mut forwarded) = (0, 0);
+    for _ in 0..64 {
+        let mut h = TestHost::new("app.example.com", "/ab", config);
+        match plugin.handle_request(&mut h).unwrap() {
+            Next::Stop => redirected += 1,
+            Next::Continue(_) => forwarded += 1,
+        }
+    }
+    assert!(
+        redirected > 0 && forwarded > 0,
+        "expected a mix, got {redirected} redirected / {forwarded} forwarded"
+    );
+}
+
+#[test]
+fn large_ruleset_is_read_in_full() {
+    // ~170 KiB of config: well past the guest's first 64 KiB read, so the
+    // guest must re-read with the full length. Truncated JSON would parse as
+    // no rules and silently disable every redirect.
+    let rules: Vec<String> = (0..2000)
+        .map(|i| {
+            format!(r#"{{"id":"r{i}","source":{{"path":"/old-{i}"}},"rank":0,"target":"/new-{i}","status_code":301}}"#)
+        })
+        .collect();
+    let config = format!(r#"{{"rules":[{}]}}"#, rules.join(","));
+    assert!(config.len() > 128 * 1024);
+
+    let mut h = TestHost::new("app.example.com", "/old-1999", config.as_bytes());
+    let limits = Limits {
+        timeout: std::time::Duration::from_secs(5),
+        ..Limits::default()
+    };
+    let plugin = Plugin::from_bytes(guest_wasm(), limits).unwrap();
+    assert_eq!(plugin.handle_request(&mut h).unwrap(), Next::Stop);
+    assert_eq!(h.response_header("location").as_deref(), Some("/new-1999"));
+}
+
+#[test]
+fn reused_instance_follows_config_changes() {
+    // With instance reuse the guest caches its Router. One plugin serving two
+    // routes with different configs must still match each request against its
+    // own route's rules, on the same instance.
+    let plugin = Plugin::from_bytes(guest_wasm(), Limits::default())
+        .unwrap()
+        .with_instance_reuse(1);
+    let other: &[u8] = br#"{"rules":[
+        {"id":"r2","source":{"path":"/old"},"rank":0,"target":"/elsewhere","status_code":302}
+    ]}"#;
+    for (config, status, location) in [
+        (CONFIG, 301, "/new"),
+        (CONFIG, 301, "/new"),
+        (other, 302, "/elsewhere"),
+        (CONFIG, 301, "/new"),
+    ] {
+        let mut h = TestHost::new("app.example.com", "/old", config);
+        assert_eq!(plugin.handle_request(&mut h).unwrap(), Next::Stop);
+        assert_eq!(h.status_code(), status);
+        assert_eq!(h.response_header("location").as_deref(), Some(location));
+    }
+    let mut h = TestHost::new("app.example.com", "/old", b"{\"rules\":[]}");
+    assert!(matches!(
+        plugin.handle_request(&mut h).unwrap(),
+        Next::Continue(_)
+    ));
+}
+
+#[test]
+fn reused_instance_still_samples_per_request() {
+    // A cached Router must not freeze sampling: draws stay per request.
+    let config = br#"{"rules":[
+        {"id":"s1","source":{"path":"/ab","sampling":50},"rank":0,"target":"/b","status_code":302}
+    ]}"#;
+    let plugin = Plugin::from_bytes(guest_wasm(), Limits::default())
+        .unwrap()
+        .with_instance_reuse(1);
+    let (mut redirected, mut forwarded) = (0, 0);
+    for _ in 0..64 {
+        let mut h = TestHost::new("app.example.com", "/ab", config);
+        match plugin.handle_request(&mut h).unwrap() {
+            Next::Stop => redirected += 1,
+            Next::Continue(_) => forwarded += 1,
+        }
+    }
+    assert!(redirected > 0 && forwarded > 0, "{redirected}/{forwarded}");
+}
