@@ -99,6 +99,21 @@ fn read_via<F: Fn(i32, i32) -> i32>(cap: usize, f: F) -> String {
     String::from_utf8(buf).unwrap_or_default()
 }
 
+/// Read the whole plugin config. `get_config` returns the full length even
+/// when the buffer is smaller, so re-call with an exact-size buffer instead of
+/// truncating: a cut JSON ruleset would parse as no rules at all.
+fn read_config() -> String {
+    const FIRST: usize = 64 * 1024;
+    let mut buf = vec![0u8; FIRST];
+    let len = unsafe { get_config(buf.as_mut_ptr() as i32, FIRST as i32) }.max(0) as usize;
+    if len > FIRST {
+        buf = vec![0u8; len];
+        unsafe { get_config(buf.as_mut_ptr() as i32, len as i32) };
+    }
+    buf.truncate(len);
+    String::from_utf8(buf).unwrap_or_default()
+}
+
 fn request_header_names() -> Vec<String> {
     let mut buf = vec![0u8; 4096];
     let res = unsafe { get_header_names(REQUEST, buf.as_mut_ptr() as i32, 4096) };
@@ -218,7 +233,7 @@ fn scheme() -> &'static str {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_request() -> i64 {
-    let cfg = read_via(65536, |p, l| unsafe { get_config(p, l) });
+    let cfg = read_config();
     let Some(router) = build_router(parse_ruleset(&cfg)) else {
         return 1; // no rules → let the request through
     };

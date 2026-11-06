@@ -213,3 +213,26 @@ fn sampled_rule_varies_across_requests() {
         "expected a mix, got {redirected} redirected / {forwarded} forwarded"
     );
 }
+
+#[test]
+fn large_ruleset_is_read_in_full() {
+    // ~170 KiB of config: well past the guest's first 64 KiB read, so the
+    // guest must re-read with the full length. Truncated JSON would parse as
+    // no rules and silently disable every redirect.
+    let rules: Vec<String> = (0..2000)
+        .map(|i| {
+            format!(r#"{{"id":"r{i}","source":{{"path":"/old-{i}"}},"rank":0,"target":"/new-{i}","status_code":301}}"#)
+        })
+        .collect();
+    let config = format!(r#"{{"rules":[{}]}}"#, rules.join(","));
+    assert!(config.len() > 128 * 1024);
+
+    let mut h = TestHost::new("app.example.com", "/old-1999", config.as_bytes());
+    let limits = Limits {
+        timeout: std::time::Duration::from_secs(5),
+        ..Limits::default()
+    };
+    let plugin = Plugin::from_bytes(guest_wasm(), limits).unwrap();
+    assert_eq!(plugin.handle_request(&mut h).unwrap(), Next::Stop);
+    assert_eq!(h.response_header("location").as_deref(), Some("/new-1999"));
+}
