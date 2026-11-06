@@ -100,6 +100,15 @@ labels:
 Each `rules` entry is an engine-format `redirectionio::api::Rule`. You normally
 never hand-write these — the sync binary produces them from your project.
 
+## Host requirements
+
+Besides the standard http-wasm functions, the plugin imports two non-standard
+host extensions from `http_handler`: `get_time_unix_nanos` (request timestamp,
+for date/time/weekday rule conditions) and `get_random` (entropy, for rule
+sampling). A `wasm32-unknown-unknown` guest has neither a clock nor an entropy
+source, and each request runs in a fresh instance. The host must provide both,
+otherwise the plugin fails to instantiate.
+
 ## Behaviour
 
 - **Redirect** — a matching rule with a status code sets that status + `Location`

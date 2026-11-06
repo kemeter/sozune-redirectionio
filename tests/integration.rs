@@ -168,3 +168,48 @@ fn no_config_forwards() {
     assert!(matches!(next, Next::Continue(_)));
     assert!(host.response_header("location").is_none());
 }
+
+#[test]
+fn dated_rule_uses_host_clock() {
+    // A window around "now" only matches if the guest reads the host clock:
+    // without a request timestamp the engine treats date conditions as unmet.
+    let config = br#"{"rules":[
+        {"id":"d1","source":{"path":"/promo","datetime":[["2000-01-01T00:00:00Z","2999-12-31T23:59:59Z"]]},"rank":0,"target":"/sale","status_code":302}
+    ]}"#;
+    let (next, host) = run("app.example.com", "/promo", config);
+    assert_eq!(next, Next::Stop);
+    assert_eq!(host.status_code(), 302);
+    assert_eq!(host.response_header("location").as_deref(), Some("/sale"));
+}
+
+#[test]
+fn expired_dated_rule_forwards() {
+    let config = br#"{"rules":[
+        {"id":"d1","source":{"path":"/promo","datetime":[["2000-01-01T00:00:00Z","2001-01-01T00:00:00Z"]]},"rank":0,"target":"/sale","status_code":302}
+    ]}"#;
+    let (next, _) = run("app.example.com", "/promo", config);
+    assert!(matches!(next, Next::Continue(_)));
+}
+
+#[test]
+fn sampled_rule_varies_across_requests() {
+    // Every request runs in a fresh instance, so a guest-local PRNG would draw
+    // the same value each time and a 50% rule would be all-or-nothing. With
+    // host entropy, 64 requests yield both outcomes (miss chance ~ 2^-63).
+    let config = br#"{"rules":[
+        {"id":"s1","source":{"path":"/ab","sampling":50},"rank":0,"target":"/b","status_code":302}
+    ]}"#;
+    let plugin = Plugin::from_bytes(guest_wasm(), Limits::default()).unwrap();
+    let (mut redirected, mut forwarded) = (0, 0);
+    for _ in 0..64 {
+        let mut h = TestHost::new("app.example.com", "/ab", config);
+        match plugin.handle_request(&mut h).unwrap() {
+            Next::Stop => redirected += 1,
+            Next::Continue(_) => forwarded += 1,
+        }
+    }
+    assert!(
+        redirected > 0 && forwarded > 0,
+        "expected a mix, got {redirected} redirected / {forwarded} forwarded"
+    );
+}
