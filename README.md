@@ -84,6 +84,9 @@ plugin config.
 plugins:
   redirectionio:
     path: /plugins/sozune_redirectionio.wasm
+    # Keep guest instances between requests so the compiled rules are reused
+    # instead of rebuilt per request (see "Host requirements").
+    reuse_instances: 8
     config:
       rules:
         # engine-format rules, as produced by the sync binary:
@@ -111,8 +114,9 @@ otherwise the plugin fails to instantiate.
 
 The guest caches the Router it builds from its config (keyed by the config, so
 routes with different rules stay separate). The cache only pays off when the
-host reuses guest instances across requests (`http-wasm-host`'s
-`Plugin::with_instance_reuse`); with a fresh instance per request the config is
+host reuses guest instances across requests (Sōzune's `reuse_instances`
+plugin option, `http-wasm-host`'s `Plugin::with_instance_reuse`); with a fresh
+instance per request the config is
 re-parsed and the Router rebuilt every time, a cost that grows with the number
 of rules (roughly 10 ms per 1000 rules).
 
