@@ -1,7 +1,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod ffi;
 mod log_override;
+mod log_tags;
 mod peer_override;
+mod request_header_filter;
 #[cfg(feature = "router")]
 mod run;
 mod status_code_update;
@@ -9,7 +11,7 @@ mod status_code_update;
 mod trace;
 mod unit_trace;
 
-use std::{cell::RefCell, fmt::Debug, rc::Rc};
+use std::{cell::RefCell, collections::BTreeSet, fmt::Debug, rc::Rc};
 #[cfg(feature = "router")]
 use std::{iter::FromIterator, sync::Arc};
 
@@ -25,19 +27,29 @@ pub use crate::action::unit_trace::UnitTrace;
 #[cfg(feature = "router")]
 use crate::api::Rule;
 #[cfg(feature = "router")]
-use crate::api::TextBodyFilter;
-#[cfg(feature = "router")]
 use crate::http::Request;
-#[cfg(feature = "router")]
-use crate::marker::StaticOrDynamic;
 #[cfg(feature = "router")]
 use crate::router::Route;
 use crate::{
-    action::{log_override::LogOverride, peer_override::PeerOverride},
+    action::{
+        log_override::LogOverride,
+        log_tags::LogTags,
+        peer_override::PeerOverride,
+        request_header_filter::{RequestHeaderFilterAction, is_protected_request_header},
+    },
     api::{BodyFilter, HeaderFilter, Peer, VariableValue},
     filter::{FilterBodyAction, FilterHeaderAction},
     http::Header,
+    marker::StaticOrDynamic,
 };
+
+/// Version of the agent <-> proxy-module wire protocol this build speaks. The agent
+/// advertises it inside the MATCH action (see `Action::agent_protocol_version_*`) so a
+/// proxy module can tell whether the agent understands newer commands before sending
+/// them. Mirrors `REDIRECTIONIO_PROTOCOL_VERSION_MAJOR`/`_MINOR` in the C modules.
+/// `RULE_COUNT` was introduced in 1.1.
+pub const PROTOCOL_VERSION_MAJOR: u8 = 1;
+pub const PROTOCOL_VERSION_MINOR: u8 = 1;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Action {
@@ -53,7 +65,18 @@ pub struct Action {
     log_override: Option<LogOverride>,
     peer_override: Option<PeerOverride>,
     #[serde(default)]
+    log_tags: Vec<LogTags>,
+    #[serde(default)]
+    request_header_filters: Vec<RequestHeaderFilterAction>,
+    #[serde(default)]
     variables: Vec<(String, VariableValue)>,
+    // Protocol version the agent speaks, advertised to proxy modules in the MATCH
+    // response. Absent (0.0) when the action comes from an agent that predates protocol
+    // negotiation, which a module reads as "does not support newer commands".
+    #[serde(default)]
+    agent_protocol_version_major: u8,
+    #[serde(default)]
+    agent_protocol_version_minor: u8,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -69,6 +92,9 @@ struct HeaderFilterAction {
     on_response_status_codes: Vec<u16>,
     exclude_response_status_codes: bool,
     rule_id: Option<String>,
+    // Only set when the rule has a response header variable: the value is then replaced in `filter_headers`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    variables: Vec<(String, VariableValue)>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -77,6 +103,8 @@ struct BodyFilterAction {
     on_response_status_codes: Vec<u16>,
     exclude_response_status_codes: bool,
     rule_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    variables: Vec<(String, VariableValue)>,
 }
 
 impl Default for Action {
@@ -90,7 +118,11 @@ impl Default for Action {
             rules_applied: LinkedHashSet::new(),
             log_override: None,
             peer_override: None,
+            log_tags: Vec::new(),
+            request_header_filters: Vec::new(),
             variables: Vec::new(),
+            agent_protocol_version_major: 0,
+            agent_protocol_version_minor: 0,
         }
     }
 }
@@ -98,6 +130,19 @@ impl Default for Action {
 impl Action {
     pub fn get_applied_rule_ids(&self) -> &LinkedHashSet<String> {
         &self.rules_applied
+    }
+
+    /// Stamp the protocol version the agent speaks so proxy modules can negotiate
+    /// capabilities from the MATCH response.
+    pub fn set_agent_protocol_version(&mut self, major: u8, minor: u8) {
+        self.agent_protocol_version_major = major;
+        self.agent_protocol_version_minor = minor;
+    }
+
+    /// Whether the agent that produced this action understands the `RULE_COUNT` command,
+    /// introduced in protocol 1.1. Older agents advertise no version (0.0) -> false.
+    pub fn agent_supports_rule_count(&self) -> bool {
+        (self.agent_protocol_version_major, self.agent_protocol_version_minor) >= (1, 1)
     }
 
     pub fn get_applied_rule_ids_vec(&self) -> Vec<String> {
@@ -165,11 +210,23 @@ impl Action {
 
         let mut header_filters = Vec::new();
         let mut body_filters = Vec::new();
+        let deferred_variables = if variables.iter().any(|(_, value)| value.is_response_header()) {
+            variables.clone()
+        } else {
+            Vec::new()
+        };
+        let replace_now = |value: &String| {
+            if deferred_variables.is_empty() {
+                StaticOrDynamic::replace(value.clone(), &variables, true)
+            } else {
+                value.clone()
+            }
+        };
 
         if let Some(target) = &rule.target
             && !target.is_empty()
         {
-            let mut value = StaticOrDynamic::replace(target.clone(), &variables, true);
+            let mut value = replace_now(target);
 
             if let Some(skipped_query_params) = request.path_and_query_skipped.skipped_query_params.as_ref() {
                 if value.contains('?') {
@@ -195,6 +252,7 @@ impl Action {
                 },
                 exclude_response_status_codes: rule.source.exclude_response_status_codes.is_some(),
                 rule_id: Some(rule.id.clone()),
+                variables: deferred_variables.clone(),
             })
         }
 
@@ -204,36 +262,36 @@ impl Action {
                     filter: HeaderFilter {
                         action: filter.action.clone(),
                         header: filter.header.clone(),
-                        value: StaticOrDynamic::replace(filter.value.clone(), &variables, true),
+                        value: replace_now(&filter.value),
                         id: filter.id.clone(),
                         target_hash: filter.target_hash.clone(),
                     },
                     on_response_status_codes: on_response_status_codes.clone(),
                     exclude_response_status_codes: rule.source.exclude_response_status_codes.is_some(),
                     rule_id: Some(rule.id.clone()),
+                    variables: deferred_variables.clone(),
                 });
             }
         }
 
         if let Some(rule_body_filters) = rule.body_filters.as_ref() {
             for filter in rule_body_filters {
+                let filter = if deferred_variables.is_empty() {
+                    filter.clone_with_variables_replaced(&variables)
+                } else {
+                    Some(filter.clone())
+                };
+
+                let Some(filter) = filter else {
+                    continue;
+                };
+
                 body_filters.push(BodyFilterAction {
-                    filter: match filter {
-                        BodyFilter::HTML(html_body_filter) => BodyFilter::HTML(html_body_filter.clone_with_variables_replaced(&variables)),
-                        BodyFilter::Text(text_body_filter) => BodyFilter::Text(TextBodyFilter {
-                            action: text_body_filter.action.clone(),
-                            content: StaticOrDynamic::replace(text_body_filter.content.clone(), &variables, true),
-                            id: text_body_filter.id.clone(),
-                            target_hash: text_body_filter.target_hash.clone(),
-                        }),
-                        BodyFilter::HTMLToMarkdown(html_to_markdown_filter) => BodyFilter::HTMLToMarkdown(html_to_markdown_filter.clone()),
-                        BodyFilter::Other(_) => {
-                            continue;
-                        }
-                    },
+                    filter,
                     on_response_status_codes: on_response_status_codes.clone(),
                     exclude_response_status_codes: rule.source.exclude_response_status_codes.is_some(),
                     rule_id: Some(rule.id.clone()),
+                    variables: deferred_variables.clone(),
                 });
             }
         }
@@ -269,7 +327,48 @@ impl Action {
             } else {
                 None
             },
-            variables,
+            log_tags: match rule.log_tags.as_ref() {
+                Some(tags) if !tags.is_empty() => vec![LogTags {
+                    tags: if deferred_variables.is_empty() {
+                        LogTags::resolve(tags, &variables)
+                    } else {
+                        tags.clone()
+                    },
+                    variables: deferred_variables.clone(),
+                    rule_id: Some(rule.id.clone()),
+                    on_response_status_codes: on_response_status_codes.clone(),
+                    exclude_response_status_codes: rule.source.exclude_response_status_codes.is_some(),
+                    unit_id: rule.log_tags_unit_id.clone(),
+                }],
+                _ => Vec::new(),
+            },
+            // The request is sent before any response exists, so a response status trigger cannot apply,
+            // and a response header variable falls back to its default.
+            request_header_filters: match rule.request_header_filters.as_ref() {
+                Some(filters) if on_response_status_codes.is_empty() => {
+                    let request_variables = VariableValue::resolve_response_headers(&variables, &[]);
+
+                    filters
+                        .iter()
+                        .filter(|filter| !is_protected_request_header(&filter.header))
+                        .map(|filter| RequestHeaderFilterAction {
+                            filter: HeaderFilter {
+                                action: filter.action.clone(),
+                                header: filter.header.clone(),
+                                value: StaticOrDynamic::replace(filter.value.clone(), &request_variables, true),
+                                id: filter.id.clone(),
+                                target_hash: filter.target_hash.clone(),
+                            },
+                            rule_id: Some(rule.id.clone()),
+                        })
+                        .collect()
+                }
+                _ => Vec::new(),
+            },
+            // Older proxy modules fail to deserialize an action holding a variable kind they do not know.
+            variables: variables.into_iter().filter(|(_, value)| !value.is_response_header()).collect(),
+            agent_protocol_version_major: 0,
+            agent_protocol_version_minor: 0,
         };
 
         (
@@ -348,6 +447,8 @@ impl Action {
             self.peer_override = Some(other_peer_override);
         }
 
+        self.log_tags.extend(other.log_tags);
+        self.request_header_filters.extend(other.request_header_filters);
         self.variables.extend(other.variables);
     }
 
@@ -476,11 +577,22 @@ impl Action {
                 }
             }
 
-            filters.push(filter.filter.clone());
+            let mut header_filter = filter.filter.clone();
+
+            if !filter.variables.is_empty() {
+                let variables = VariableValue::resolve_response_headers(&filter.variables, &headers);
+                header_filter.value = StaticOrDynamic::replace(header_filter.value, &variables, true);
+            }
+
+            filters.push(header_filter);
 
             if let Some(rule_id) = filter.rule_id.as_ref() {
                 self.rules_applied.insert(rule_id.clone());
             }
+        }
+
+        for log_tags in &mut self.log_tags {
+            log_tags.resolve_response_headers(&headers);
         }
 
         let mut new_headers = match FilterHeaderAction::new(filters) {
@@ -502,6 +614,14 @@ impl Action {
         new_headers
     }
 
+    /// Body filters deliberately apply whatever `response_status_code` is - 206 and 304
+    /// included, unless the rule's own status-code trigger says otherwise. Several rules can
+    /// combine on one request (e.g. one filters the body while another rewrites the status
+    /// code to 200), so only the rule author can judge whether the composed response is
+    /// coherent; besides, gating on the backend status would let clients bypass
+    /// content-replacement rules by sending a `Range` header. Do not add status-based guards
+    /// here - the only built-in restriction is content-type based, in
+    /// `FilterBodyActionItem::new` (no text splicing into binary content types).
     pub fn create_filter_body(
         &mut self,
         response_status_code: u16,
@@ -524,7 +644,14 @@ impl Action {
                 self.rules_applied.insert(rule_id.clone());
             }
 
-            filters.push(filter.filter.clone());
+            if filter.variables.is_empty() {
+                filters.push(filter.filter.clone());
+            } else if let Some(body_filter) = filter
+                .filter
+                .clone_with_variables_replaced(&VariableValue::resolve_response_headers(&filter.variables, headers))
+            {
+                filters.push(body_filter);
+            }
         }
 
         let body_filter = FilterBodyAction::new(filters, headers, unit_trace, self.variables.clone());
@@ -556,6 +683,47 @@ impl Action {
         }
     }
 
+    pub fn get_log_tags(&self, response_status_code: u16, unit_trace: Option<Rc<RefCell<UnitTrace>>>) -> Vec<String> {
+        let mut tags = BTreeSet::new();
+
+        for log_tags in self.log_tags.iter().filter(|log_tags| log_tags.applies_to(response_status_code)) {
+            tags.extend(log_tags.resolved_tags());
+
+            if let (Some(trace), Some(unit_id)) = (&unit_trace, &log_tags.unit_id) {
+                trace.borrow_mut().add_unit_id_with_target("log_tags", unit_id);
+            }
+        }
+
+        tags.into_iter().collect()
+    }
+
+    pub fn has_request_header_filters(&self) -> bool {
+        !self.request_header_filters.is_empty()
+    }
+
+    /// Filters the headers of the request forwarded to the backend. The request headers
+    /// used for matching and logging are left untouched.
+    pub fn filter_request_headers(&mut self, headers: Vec<Header>, unit_trace: Option<Rc<RefCell<UnitTrace>>>) -> Vec<Header> {
+        let mut filters = Vec::new();
+
+        for filter in &self.request_header_filters {
+            filters.push(filter.filter.clone());
+
+            if let Some(rule_id) = filter.rule_id.as_ref() {
+                self.rules_applied.insert(rule_id.clone());
+
+                if let Some(trace) = &unit_trace {
+                    trace.borrow_mut().rule_ids_applied.insert(rule_id.clone());
+                }
+            }
+        }
+
+        match FilterHeaderAction::new(filters) {
+            None => headers,
+            Some(filter_action) => filter_action.filter(headers, unit_trace),
+        }
+    }
+
     pub fn need_proxification(&self) -> bool {
         if let Some(update) = &self.status_code_update
             && !update.on_response_status_codes.is_empty()
@@ -578,5 +746,41 @@ impl Action {
         }
 
         false
+    }
+}
+
+#[cfg(test)]
+mod agent_protocol_tests {
+    use super::Action;
+
+    #[test]
+    fn missing_version_fields_default_to_unsupported() {
+        // An action JSON produced by an agent that predates protocol negotiation has no
+        // version fields; #[serde(default)] makes them 0.0, i.e. rule-count unsupported.
+        let json =
+            r#"{"status_code_update":null,"header_filters":[],"body_filters":[],"rule_ids":[],"log_override":null,"peer_override":null}"#;
+        let action: Action = serde_json::from_str(json).unwrap();
+
+        assert!(!action.agent_supports_rule_count());
+    }
+
+    #[test]
+    fn version_1_1_supports_rule_count_through_serialization() {
+        let mut action = Action::default();
+        action.set_agent_protocol_version(1, 1);
+
+        // Round-trip through JSON, as it travels in the MATCH response.
+        let serialized = serde_json::to_string(&action).unwrap();
+        let parsed: Action = serde_json::from_str(&serialized).unwrap();
+
+        assert!(parsed.agent_supports_rule_count());
+    }
+
+    #[test]
+    fn version_1_0_does_not_support_rule_count() {
+        let mut action = Action::default();
+        action.set_agent_protocol_version(1, 0);
+
+        assert!(!action.agent_supports_rule_count());
     }
 }

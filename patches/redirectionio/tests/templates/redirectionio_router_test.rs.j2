@@ -37,7 +37,7 @@ fn test_{{ name }}_{{ loop.index }}() {
     {%- if test.scheme -%}Some(r#"{{ test.scheme }}"#.to_string()){% else %}None{%- endif -%},
     {%- if test.method -%}Some(r#"{{ test.method }}"#.to_string()){% else %}None{%- endif -%},
     {%- if test.remote_ip -%}r#"{{ test.remote_ip }}"#.to_string().parse().ok(){% else %}None{%- endif -%},
-    {%- if test.sampling_override | default(value="null") != "null" -%}Some({%- if test.sampling_override -%}true{%- else -%}false{%- endif -%}){%- else -%}None{%- endif -%}
+    {%- if test.sampling_override is bool -%}Some({%- if test.sampling_override -%}true{%- else -%}false{%- endif -%}){%- else -%}None{%- endif -%}
     );
     {%- if test.headers -%}
     {% for header in test.headers %}
@@ -70,7 +70,7 @@ fn test_{{ name }}_{{ loop.index }}() {
     assert_eq!(target_header.value, r#"{{ test.location }}"#);
     {%- endif -%}
 {% if test.should_filter_body %}
-    let body_filter_opt = action.create_filter_body(response_status_code, &[], None);
+    let body_filter_opt = action.create_filter_body(response_status_code, &[{% if test.should_filter_header and test.should_filter_header.enable %}{% for header in test.should_filter_header.original_headers %}Header { name: r#"{{ header.name }}"#.to_string(), value: r#"{{ header.value }}"#.to_string() }, {% endfor %}{% endif %}], None);
     assert_eq!(body_filter_opt.is_some(), {{ test.should_filter_body.enable }});
 {% if test.should_filter_body.enable %}
     let mut body_filter = body_filter_opt.unwrap();
@@ -89,6 +89,10 @@ fn test_{{ name }}_{{ loop.index }}() {
     assert_eq!(action.should_log_request(true, response_status_code, None), false);
     {%- else %}
     assert_eq!(action.should_log_request(true, response_status_code, None), true);
+    {%- endif -%}
+{% if test.backend_request_headers is iterable %}
+    let backend_request_headers: Vec<(String, String)> = action.filter_request_headers(request_configured.headers.clone(), None).into_iter().map(|h| (h.name, h.value)).collect();
+    assert_eq!(backend_request_headers, vec![{% for header in test.backend_request_headers %}(r#"{{ header.name }}"#.to_string(), r#"{{ header.value }}"#.to_string()), {% endfor %}] as Vec<(String, String)>);
     {%- endif -%}
 {% endif %}
 {%- if test.should_filter_header and test.should_filter_header.enable %}
@@ -111,6 +115,9 @@ fn test_{{ name }}_{{ loop.index }}() {
 
     assert!(value.is_none());
 {% endfor -%}
+{%- endif %}
+{%- if test.match and test.log_tags is iterable %}
+    assert_eq!(action.get_log_tags(response_status_code, None), vec![{% for tag in test.log_tags %}r#"{{ tag }}"#.to_string(), {% endfor %}] as Vec<String>);
 {%- endif %}
 }
 {% endfor %}

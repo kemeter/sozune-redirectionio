@@ -1,3 +1,25 @@
+## 3.4.0 - 05-10-2026
+
+* [http] Drop a default port (80 or 443) from the request host, whatever the scheme, in every `Request` constructor, `set_host()` and `rebuild_with_config()`: a rule on `example.com` now matches a client sending `Host: example.com:443`, any other port is kept
+* [http] Add `Request::set_scheme()` and `Request::set_host()`
+* [ffi] Add `redirectionio_request_set_forwarded()`, which also takes the scheme and the host from a trusted proxy's `Forwarded` header - `redirectionio_request_set_remote_addr()` still only sets the remote ip
+* [action] Add the `log_tags` rule action: tags from every applied rule are merged, deduplicated and sorted by `Action::get_log_tags()`, honouring the rule's response status codes trigger
+* [api] Add `tags` to `Log`, set with `Log::with_tags()` - the FFI and wasm `create_log_in_json` fill it from the action
+* [router] Add the `response_header` variable, resolved from the backend response headers before the header filters apply: usable in header filters, body filters and log tags, so a rule can tag the logs with a response header then remove it
+* [action] Add the `request_header_filters` rule action, which adds, replaces or removes headers of the request forwarded to the backend with `Action::filter_request_headers()`; framing and hop-by-hop headers (`Host`, `Content-Length`, `Connection`…) are never changed, and the action is ignored on a rule with a response status codes trigger - a `response_header` variable falls back to its default there
+* [ffi] Add `redirectionio_action_request_header_filter_filter()`, which returns null when the request has to be left untouched; non UTF-8 request headers are forwarded untouched
+* [api] Add `backend_request_headers` to the explain request and test examples output
+* [api] Report a backend switch as applied when replaying a test example
+* [chore] Update dependencies (lol_html 3, html-to-markdown-rs 3.11…)
+
+## 3.3.0 - 29-07-2026
+
+* [filter] Do not append or prepend text to media and other binary content types, which splicing corrupts - replacing a body still applies to every content type
+* [action] Expose the agent protocol version carried in match responses: `PROTOCOL_VERSION_MAJOR`/`PROTOCOL_VERSION_MINOR`, `Action::set_agent_protocol_version()` and `Action::agent_supports_rule_count()`, so a proxy can tell whether the agent understands the `RULE_COUNT` command (protocol >= 1.1) before sending it
+* [ffi] Add `redirectionio_action_agent_supports_rule_count()`
+* [router] Fix options for variables with output transforms
+* [router] Fix rule matching for sampling, and ignore sampling in examples
+
 ## 3.2.0 - 26-06-2026
 
 * [action] Fix capture backend response headers to pass them to body filters before redirection.io mutates them

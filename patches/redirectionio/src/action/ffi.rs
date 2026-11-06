@@ -6,7 +6,10 @@ use crate::{
     action::Action,
     ffi_helpers::{c_char_to_str, string_to_c_char},
     filter::{Buffer, FilterBodyAction},
-    http::ffi::{HeaderMap, header_map_to_http_headers, http_headers_to_header_map},
+    http::ffi::{
+        HeaderMap, header_map_to_http_headers, header_map_to_http_headers_keeping_raw, http_headers_to_header_map,
+        http_headers_to_header_map_with_raw,
+    },
 };
 
 /// Deserialize a string to an action
@@ -96,6 +99,36 @@ pub extern "C" fn redirectionio_action_header_filter_filter(
     http_headers_to_header_map(headers)
 }
 
+/// Filter the headers of the request forwarded to the backend.
+///
+/// Returns null when the action has no request header filter, in which case the request
+/// must be left untouched. Otherwise returns the complete new list of request headers,
+/// in the same order as the input list, which replaces the original one. The returned
+/// list must be freed with `redirectionio_header_map_drop`.
+#[unsafe(no_mangle)]
+pub extern "C" fn redirectionio_action_request_header_filter_filter(
+    _action: *mut Action,
+    header_map: *const HeaderMap,
+) -> *const HeaderMap {
+    if _action.is_null() {
+        return null();
+    }
+
+    // SAFETY: _action is a valid pointer to an Action
+    let action = unsafe { &mut *_action };
+
+    if !action.has_request_header_filters() {
+        return null();
+    }
+
+    // The returned list replaces the request headers: the ones the filters cannot read are
+    // forwarded untouched rather than dropped.
+    let (headers, raw_headers) = header_map_to_http_headers_keeping_raw(header_map);
+    let headers = action.filter_request_headers(headers, None);
+
+    http_headers_to_header_map_with_raw(headers, raw_headers)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn redirectionio_action_body_filter_create(
     _action: *mut Action,
@@ -167,4 +200,115 @@ pub extern "C" fn redirectionio_action_should_log_request(_action: *mut Action, 
     let action = unsafe { &mut *_action };
 
     action.should_log_request(allow_log_config, response_status_code, None)
+}
+
+/// Serialize the ids of the rules applied by this action as a JSON array of strings.
+///
+/// Used to count rule executions when logging is disabled for the request (so no log
+/// is sent). Returns null when no rule was applied. The returned string must be freed
+/// with `redirectionio_string_drop`.
+#[unsafe(no_mangle)]
+pub extern "C" fn redirectionio_action_get_applied_rule_ids(_action: *mut Action) -> *const c_char {
+    if _action.is_null() {
+        return null();
+    }
+
+    // SAFETY: _action is a valid pointer to an Action
+    let action = unsafe { &*_action };
+    let rule_ids = action.get_applied_rule_ids_vec();
+
+    if rule_ids.is_empty() {
+        return null();
+    }
+
+    match json_encode(&rule_ids) {
+        Err(error) => {
+            tracing::error!("unable to serialize applied rule ids: {error}");
+
+            null()
+        }
+        Ok(serialized) => string_to_c_char(serialized),
+    }
+}
+
+/// Whether the agent that produced this action understands the `RULE_COUNT` command
+/// (protocol >= 1.1), as advertised in the MATCH response. A proxy module must check this
+/// before sending `RULE_COUNT`, so it never sends it to an older agent that would reject
+/// the unknown command and close the connection. Returns false on a null action or when
+/// the agent advertised no version (older agent).
+#[unsafe(no_mangle)]
+pub extern "C" fn redirectionio_action_agent_supports_rule_count(_action: *mut Action) -> bool {
+    if _action.is_null() {
+        return false;
+    }
+
+    // SAFETY: _action is a valid pointer to an Action
+    let action = unsafe { &*_action };
+
+    action.agent_supports_rule_count()
+}
+
+#[cfg(test)]
+mod request_header_filter_tests {
+    use std::ffi::CString;
+
+    use super::redirectionio_action_request_header_filter_filter;
+    use crate::{
+        action::Action,
+        http::{
+            Header,
+            ffi::{header_map_to_http_headers_keeping_raw, http_headers_to_header_map_with_raw, redirectionio_header_map_drop},
+        },
+    };
+
+    const BASE: &str =
+        r#""status_code_update":null,"header_filters":[],"body_filters":[],"rule_ids":[],"log_override":null,"peer_override":null"#;
+
+    fn header(name: &str, value: &str) -> Header {
+        Header {
+            name: name.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn returns_null_without_request_header_filters() {
+        let action = Box::into_raw(Box::new(serde_json::from_str::<Action>(&format!("{{{BASE}}}")).unwrap()));
+        let input = http_headers_to_header_map_with_raw(vec![header("X-Foo", "foo")], Vec::new());
+
+        assert!(redirectionio_action_request_header_filter_filter(action, input).is_null());
+
+        unsafe {
+            redirectionio_header_map_drop(input);
+            drop(Box::from_raw(action));
+        }
+    }
+
+    #[test]
+    fn keeps_order_and_forwards_non_utf8_headers() {
+        let json = format!(
+            r#"{{{BASE},"request_header_filters":[{{"filter":{{"action":"override","header":"X-Second","value":"new","id":null,"target_hash":null}},"rule_id":"rule"}}]}}"#
+        );
+        let action = Box::into_raw(Box::new(serde_json::from_str::<Action>(&json).unwrap()));
+        let raw = (CString::new("X-Raw").unwrap(), CString::new(vec![0xff, 0xfe]).unwrap());
+        let input = http_headers_to_header_map_with_raw(vec![header("X-First", "1"), header("X-Second", "2")], vec![raw.clone()]);
+
+        let output = redirectionio_action_request_header_filter_filter(action, input);
+        let (headers, raw_headers) = header_map_to_http_headers_keeping_raw(output);
+
+        assert_eq!(
+            headers.into_iter().map(|h| (h.name, h.value)).collect::<Vec<_>>(),
+            vec![
+                ("X-First".to_string(), "1".to_string()),
+                ("X-Second".to_string(), "new".to_string())
+            ]
+        );
+        assert_eq!(raw_headers, vec![raw]);
+
+        unsafe {
+            redirectionio_header_map_drop(input);
+            redirectionio_header_map_drop(output);
+            drop(Box::from_raw(action));
+        }
+    }
 }

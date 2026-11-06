@@ -44,6 +44,11 @@ mod generated_tests {
     }
 
     #[test]
+    fn test_examples_log_tags() {
+        do_test("log_tags");
+    }
+
+    #[test]
     fn test_examples_must_match_false_broken() {
         do_test("must_match_false_broken");
     }
@@ -66,6 +71,11 @@ mod generated_tests {
     #[test]
     fn test_examples_one_rule_one_example() {
         do_test("one_rule_one_example");
+    }
+
+    #[test]
+    fn test_examples_switch_backend() {
+        do_test("switch_backend");
     }
 
     fn do_test(name: &str) {
