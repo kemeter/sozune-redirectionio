@@ -236,3 +236,52 @@ fn large_ruleset_is_read_in_full() {
     assert_eq!(plugin.handle_request(&mut h).unwrap(), Next::Stop);
     assert_eq!(h.response_header("location").as_deref(), Some("/new-1999"));
 }
+
+#[test]
+fn reused_instance_follows_config_changes() {
+    // With instance reuse the guest caches its Router. One plugin serving two
+    // routes with different configs must still match each request against its
+    // own route's rules, on the same instance.
+    let plugin = Plugin::from_bytes(guest_wasm(), Limits::default())
+        .unwrap()
+        .with_instance_reuse(1);
+    let other: &[u8] = br#"{"rules":[
+        {"id":"r2","source":{"path":"/old"},"rank":0,"target":"/elsewhere","status_code":302}
+    ]}"#;
+    for (config, status, location) in [
+        (CONFIG, 301, "/new"),
+        (CONFIG, 301, "/new"),
+        (other, 302, "/elsewhere"),
+        (CONFIG, 301, "/new"),
+    ] {
+        let mut h = TestHost::new("app.example.com", "/old", config);
+        assert_eq!(plugin.handle_request(&mut h).unwrap(), Next::Stop);
+        assert_eq!(h.status_code(), status);
+        assert_eq!(h.response_header("location").as_deref(), Some(location));
+    }
+    let mut h = TestHost::new("app.example.com", "/old", b"{\"rules\":[]}");
+    assert!(matches!(
+        plugin.handle_request(&mut h).unwrap(),
+        Next::Continue(_)
+    ));
+}
+
+#[test]
+fn reused_instance_still_samples_per_request() {
+    // A cached Router must not freeze sampling: draws stay per request.
+    let config = br#"{"rules":[
+        {"id":"s1","source":{"path":"/ab","sampling":50},"rank":0,"target":"/b","status_code":302}
+    ]}"#;
+    let plugin = Plugin::from_bytes(guest_wasm(), Limits::default())
+        .unwrap()
+        .with_instance_reuse(1);
+    let (mut redirected, mut forwarded) = (0, 0);
+    for _ in 0..64 {
+        let mut h = TestHost::new("app.example.com", "/ab", config);
+        match plugin.handle_request(&mut h).unwrap() {
+            Next::Stop => redirected += 1,
+            Next::Continue(_) => forwarded += 1,
+        }
+    }
+    assert!(redirected > 0 && forwarded > 0, "{redirected}/{forwarded}");
+}

@@ -234,10 +234,44 @@ fn scheme() -> &'static str {
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_request() -> i64 {
     let cfg = read_config();
-    let Some(router) = build_router(parse_ruleset(&cfg)) else {
-        return 1; // no rules → let the request through
-    };
+    with_cached_router(&cfg, |router| match router {
+        Some(router) => route_request(router),
+        None => 1, // no rules → let the request through
+    })
+}
 
+thread_local! {
+    /// The Router built from the last config seen, keyed by a hash of that
+    /// config. Only useful when the host reuses guest instances; with a fresh
+    /// instance per request it is simply rebuilt each time. Keyed so that one
+    /// instance serving several routes (each with its own config) never
+    /// matches against another route's rules.
+    static ROUTER: std::cell::RefCell<Option<(u64, Option<Router<Rule>>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn config_key(cfg: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    cfg.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Run `f` with the Router for `cfg`, building it only if the config changed.
+fn with_cached_router<R>(cfg: &str, f: impl FnOnce(Option<&Router<Rule>>) -> R) -> R {
+    let key = config_key(cfg);
+    ROUTER.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        if cached.as_ref().is_none_or(|(k, _)| *k != key) {
+            *cached = Some((key, build_router(parse_ruleset(cfg))));
+        }
+        let (_, router) = cached.as_ref().expect("just filled");
+        f(router.as_ref())
+    })
+}
+
+/// Match the current request against `router` and apply the action.
+fn route_request(router: &Router<Rule>) -> i64 {
     let host = request_header_values("host")
         .into_iter()
         .next()

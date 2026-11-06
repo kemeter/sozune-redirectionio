@@ -109,6 +109,13 @@ sampling). A `wasm32-unknown-unknown` guest has neither a clock nor an entropy
 source, and each request runs in a fresh instance. The host must provide both,
 otherwise the plugin fails to instantiate.
 
+The guest caches the Router it builds from its config (keyed by the config, so
+routes with different rules stay separate). The cache only pays off when the
+host reuses guest instances across requests (`http-wasm-host`'s
+`Plugin::with_instance_reuse`); with a fresh instance per request the config is
+re-parsed and the Router rebuilt every time, a cost that grows with the number
+of rules (roughly 10 ms per 1000 rules).
+
 ## Behaviour
 
 - **Redirect** — a matching rule with a status code sets that status + `Location`
